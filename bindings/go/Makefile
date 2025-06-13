@@ -17,6 +17,7 @@ EXAMPLES_DIR := $(wildcard examples/*)
 INCLUDE_PATH := $(abspath ../../include):$(abspath ../../ggml/include)
 LIBRARY_PATH := $(abspath ../../${BUILD_DIR}/src:$(abspath ../../${BUILD_DIR}/ggml/src))
 CUDA_PATH := $(CUDA_PATH:-/usr/local/cuda)
+CUDA_ARCH := 86
 
 ifeq ($(GGML_CUDA),1)
 	LIBRARY_PATH := $(LIBRARY_PATH):$(abspath ../../${BUILD_DIR}/ggml/src/ggml-cuda)
@@ -33,7 +34,8 @@ whisper: mkdir
 	cmake -S ../.. -B ../../${BUILD_DIR} \
 		-DGGML_CUDA=$(GGML_CUDA) \
 		-DCMAKE_BUILD_TYPE=Release \
-		-DBUILD_SHARED_LIBS=OFF
+		-DBUILD_SHARED_LIBS=OFF \
+		-DCMAKE_CUDA_ARCHITECTURES=$(CUDA_ARCH)
 	cmake --build ../../${BUILD_DIR} --target whisper
 
 test: model-small whisper modtidy

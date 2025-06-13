@@ -2,9 +2,11 @@
 # Audio samples
 #
 
+CUDA_ARCH := 86
+
 .PHONY: build
 build:
-	cmake -B build -DGGML_CUDA=$(GGML_CUDA)
+	cmake -B build -DGGML_CUDA=$(GGML_CUDA) -DCMAKE_CUDA_ARCHITECTURES=$(CUDA_ARCH)
 	cmake --build build --config Release
 
 # download a few audio samples into folder "./samples":
