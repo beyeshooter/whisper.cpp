@@ -16,10 +16,11 @@ MODELS_DIR := models
 EXAMPLES_DIR := $(wildcard examples/*)
 INCLUDE_PATH := $(abspath ../../include):$(abspath ../../ggml/include)
 LIBRARY_PATH := $(abspath ../../${BUILD_DIR}/src:$(abspath ../../${BUILD_DIR}/ggml/src))
+CUDA_PATH := $(CUDA_PATH:-/usr/local/cuda)
 
 ifeq ($(GGML_CUDA),1)
-	LIBRARY_PATH := $(LIBRARY_PATH):$(CUDA_PATH)/targets/$(UNAME_M)-linux/lib/
-	BUILD_FLAGS := -ldflags "-extldflags '-lcudart -lcuda -lcublas'"
+	LIBRARY_PATH := $(LIBRARY_PATH):$(abspath ../../${BUILD_DIR}/ggml/src/ggml-cuda)
+	BUILD_FLAGS := -ldflags "-extldflags '-lggml-cuda -lcudart -lcuda -lcublas'"
 endif
 
 ifeq ($(UNAME_S),Darwin)
@@ -30,6 +31,7 @@ all: clean whisper examples
 
 whisper: mkdir
 	cmake -S ../.. -B ../../${BUILD_DIR} \
+		-DGGML_CUDA=$(GGML_CUDA) \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DBUILD_SHARED_LIBS=OFF
 	cmake --build ../../${BUILD_DIR} --target whisper
