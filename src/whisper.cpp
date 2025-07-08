@@ -7724,6 +7724,7 @@ int whisper_full(
             return -1;
         }
         if (vad_samples.empty()) {
+            ctx->state->result_all.clear();
             return 0;
         }
         samples = vad_samples.data();
@@ -8935,6 +8936,10 @@ void whisper_log_set(ggml_log_callback log_callback, void * user_data) {
     g_state.log_callback = log_callback ? log_callback : whisper_log_callback_default;
     g_state.log_callback_user_data = user_data;
     ggml_log_set(g_state.log_callback, g_state.log_callback_user_data);
+}
+
+const char * whisper_version(void) {
+    return WHISPER_VERSION;
 }
 
 GGML_ATTRIBUTE_FORMAT(2, 3)
