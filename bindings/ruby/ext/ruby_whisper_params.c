@@ -1,4 +1,3 @@
-#include <ruby.h>
 #include "ruby_whisper.h"
 
 #define BOOL_PARAMS_SETTER(self, prop, value) \
@@ -26,10 +25,11 @@
   rb_define_method(cParams, #param_name, ruby_whisper_params_get_ ## param_name, 0); \
   rb_define_method(cParams, #param_name "=", ruby_whisper_params_set_ ## param_name, 1);
 
-#define RUBY_WHISPER_PARAMS_PARAM_NAMES_COUNT 35
+#define RUBY_WHISPER_PARAMS_PARAM_NAMES_COUNT 37
 
 extern VALUE cParams;
 extern VALUE cVADParams;
+extern VALUE mWhisper;
 
 extern ID id_call;
 
@@ -46,9 +46,11 @@ static ID id_print_special;
 static ID id_print_progress;
 static ID id_print_realtime;
 static ID id_print_timestamps;
+static ID id_carry_initial_prompt;
 static ID id_suppress_blank;
 static ID id_suppress_nst;
 static ID id_token_timestamps;
+static ID id_max_len;
 static ID id_split_on_word;
 static ID id_initial_prompt;
 static ID id_diarize;
@@ -185,6 +187,35 @@ static bool abort_callback(void * user_data) {
   return false;
 }
 
+static void
+check_thread_safety(ruby_whisper_params *rwp, VALUE *context, int n_processors)
+{
+  if (n_processors == 1) {
+    return;
+  }
+
+  if (!NIL_P(rwp->new_segment_callback_container->callback) || 0 != RARRAY_LEN(rwp->new_segment_callback_container->callbacks)) {
+    rb_raise(rb_eRuntimeError, "new segment callback not supported on parallel transcription");
+  }
+
+  if (!NIL_P(rwp->progress_callback_container->callback) || 0 != RARRAY_LEN(rwp->progress_callback_container->callbacks)) {
+    rb_raise(rb_eRuntimeError, "progress callback not supported on parallel transcription");
+  }
+
+  if (!NIL_P(rwp->encoder_begin_callback_container->callback) || 0 != RARRAY_LEN(rwp->encoder_begin_callback_container->callbacks)) {
+    rb_raise(rb_eRuntimeError, "encoder begin callback not supported on parallel transcription");
+  }
+
+  if (!NIL_P(rwp->abort_callback_container->callback) || 0 != RARRAY_LEN(rwp->abort_callback_container->callbacks)) {
+    rb_raise(rb_eRuntimeError, "abort callback not supported on parallel transcription");
+  }
+
+  VALUE log_callback = rb_iv_get(mWhisper, "log_callback");
+  if (!NIL_P(log_callback)) {
+    rb_raise(rb_eRuntimeError, "log callback not supported for parallel transcription");
+  }
+}
+
 static void register_callbacks(ruby_whisper_params * rwp, VALUE * context) {
   if (!NIL_P(rwp->new_segment_callback_container->callback) || 0 != RARRAY_LEN(rwp->new_segment_callback_container->callbacks)) {
     rwp->new_segment_callback_container->context = context;
@@ -218,9 +249,13 @@ static void set_vad_params(ruby_whisper_params *rwp)
   rwp->params.vad_params = rwvp->params;
 }
 
+/*
+  TODO: Set abort callback to trap SIGINT and SIGTERM
+*/
 void
-prepare_transcription(ruby_whisper_params *rwp, VALUE *context)
+prepare_transcription(ruby_whisper_params *rwp, VALUE *context, int n_processors)
 {
+  check_thread_safety(rwp, context, n_processors);
   register_callbacks(rwp, context);
   set_vad_params(rwp);
 }
@@ -239,6 +274,20 @@ rb_whisper_params_mark(void *p)
 void
 ruby_whisper_params_free(ruby_whisper_params *rwp)
 {
+  if (rwp->params.language) {
+    ruby_xfree((void *)rwp->params.language);
+  }
+  if (rwp->params.initial_prompt) {
+    ruby_xfree((void *)rwp->params.initial_prompt);
+  }
+  if (rwp->params.vad_model_path) {
+    ruby_xfree((void *)rwp->params.vad_model_path);
+  }
+
+  xfree(rwp->new_segment_callback_container);
+  xfree(rwp->progress_callback_container);
+  xfree(rwp->encoder_begin_callback_container);
+  xfree(rwp->abort_callback_container);
 }
 
 void
@@ -247,7 +296,7 @@ rb_whisper_params_free(void *p)
   ruby_whisper_params *rwp = (ruby_whisper_params *)p;
   // How to free user_data and callback only when not referred to by others?
   ruby_whisper_params_free(rwp);
-  free(rwp);
+  xfree(rwp);
 }
 
 static size_t
@@ -275,6 +324,15 @@ ruby_whisper_params_allocate(VALUE klass)
   ruby_whisper_params *rwp;
   VALUE obj = TypedData_Make_Struct(klass, ruby_whisper_params, &ruby_whisper_params_type, rwp);
   rwp->params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+  if (rwp->params.language != NULL) {
+    rwp->params.language = ruby_strdup(rwp->params.language);
+  }
+  if (rwp->params.initial_prompt != NULL) {
+    rwp->params.initial_prompt = ruby_strdup(rwp->params.initial_prompt);
+  }
+  if (rwp->params.vad_model_path != NULL) {
+    rwp->params.vad_model_path = ruby_strdup(rwp->params.vad_model_path);
+  }
   rwp->diarize = false;
   rwp->vad_params = TypedData_Wrap_Struct(cVADParams, &ruby_whisper_vad_params_type, (void *)&rwp->params.vad_params);
   rwp->new_segment_callback_container = rb_whisper_callback_container_allocate();
@@ -295,10 +353,12 @@ ruby_whisper_params_set_language(VALUE self, VALUE value)
 {
   ruby_whisper_params *rwp;
   TypedData_Get_Struct(self, ruby_whisper_params, &ruby_whisper_params_type, rwp);
+  ruby_xfree((void *)rwp->params.language);
+  rwp->params.language = NULL;
   if (value == Qfalse || value == Qnil) {
-    rwp->params.language = "auto";
+    rwp->params.language = ruby_strdup("auto");
   } else {
-    rwp->params.language = StringValueCStr(value);
+    rwp->params.language = ruby_strdup(StringValueCStr(value));
   }
   return value;
 }
@@ -426,6 +486,7 @@ ruby_whisper_params_set_print_realtime(VALUE self, VALUE value)
 }
 /*
  * If true, prints results from within whisper.cpp. (avoid it, use callback instead)
+ *
  * call-seq:
  *   print_realtime -> bool
  */
@@ -453,6 +514,26 @@ static VALUE
 ruby_whisper_params_get_print_timestamps(VALUE self)
 {
   BOOL_PARAMS_GETTER(self, print_timestamps)
+}
+
+/*
+ *  call-seq:
+ *    carry_initial_prompt -> true or false
+ */
+static VALUE
+ruby_whisper_params_get_carry_initial_prompt(VALUE self)
+{
+  BOOL_PARAMS_GETTER(self, carry_initial_prompt)
+}
+
+/*
+ *  call-seq:
+ *    carry_initial_prompt = bool -> bool
+ */
+static VALUE
+ruby_whisper_params_set_carry_initial_prompt(VALUE self, VALUE value)
+{
+  BOOL_PARAMS_SETTER(self, carry_initial_prompt, value)
 }
 /*
  * call-seq:
@@ -514,6 +595,33 @@ ruby_whisper_params_set_token_timestamps(VALUE self, VALUE value)
 {
   BOOL_PARAMS_SETTER(self, token_timestamps, value)
 }
+
+/*
+ * max segment length in characters.
+ *
+ * call-seq:
+ *   max_len -> Integer
+ */
+static VALUE
+ruby_whisper_params_get_max_len(VALUE self)
+{
+  ruby_whisper_params *rwp;
+  TypedData_Get_Struct(self, ruby_whisper_params, &ruby_whisper_params_type, rwp);
+  return INT2NUM(rwp->params.max_len);
+}
+/*
+ * call-seq:
+ *   max_len = length -> length
+ */
+static VALUE
+ruby_whisper_params_set_max_len(VALUE self, VALUE value)
+{
+  ruby_whisper_params *rwp;
+  TypedData_Get_Struct(self, ruby_whisper_params, &ruby_whisper_params_type, rwp);
+  rwp->params.max_len = NUM2INT(value);
+  return value;
+}
+
 /*
  * If true, split on word rather than on token (when used with max_len).
  *
@@ -559,7 +667,13 @@ ruby_whisper_params_set_initial_prompt(VALUE self, VALUE value)
 {
   ruby_whisper_params *rwp;
   TypedData_Get_Struct(self, ruby_whisper_params, &ruby_whisper_params_type, rwp);
-  rwp->params.initial_prompt = StringValueCStr(value);
+  ruby_xfree((void *)rwp->params.initial_prompt);
+  rwp->params.initial_prompt = NULL;
+  if (NIL_P(value)) {
+    rwp->params.initial_prompt = NULL;
+  } else {
+    rwp->params.initial_prompt = ruby_strdup(StringValueCStr(value));
+  }
   return value;
 }
 /*
@@ -1054,12 +1168,14 @@ ruby_whisper_params_set_vad_model_path(VALUE self, VALUE value)
 {
   ruby_whisper_params *rwp;
   TypedData_Get_Struct(self, ruby_whisper_params, &ruby_whisper_params_type, rwp);
+  ruby_xfree((void *)rwp->params.vad_model_path);
+  rwp->params.vad_model_path = NULL;
   if (NIL_P(value)) {
     rwp->params.vad_model_path = NULL;
     return value;
   }
   VALUE path = ruby_whisper_normalize_model_path(value);
-  rwp->params.vad_model_path = StringValueCStr(path);
+  rwp->params.vad_model_path = ruby_strdup(StringValueCStr(path));
   return value;
 }
 
@@ -1137,8 +1253,10 @@ ruby_whisper_params_initialize(int argc, VALUE *argv, VALUE self)
       SET_PARAM_IF_SAME(suppress_blank)
       SET_PARAM_IF_SAME(suppress_nst)
       SET_PARAM_IF_SAME(token_timestamps)
+      SET_PARAM_IF_SAME(max_len)
       SET_PARAM_IF_SAME(split_on_word)
       SET_PARAM_IF_SAME(initial_prompt)
+      SET_PARAM_IF_SAME(carry_initial_prompt)
       SET_PARAM_IF_SAME(offset)
       SET_PARAM_IF_SAME(duration)
       SET_PARAM_IF_SAME(max_text_tokens)
@@ -1271,30 +1389,32 @@ init_ruby_whisper_params(VALUE *mWhisper)
   DEFINE_PARAM(suppress_blank, 8)
   DEFINE_PARAM(suppress_nst, 9)
   DEFINE_PARAM(token_timestamps, 10)
-  DEFINE_PARAM(split_on_word, 11)
-  DEFINE_PARAM(initial_prompt, 12)
-  DEFINE_PARAM(diarize, 13)
-  DEFINE_PARAM(offset, 14)
-  DEFINE_PARAM(duration, 15)
-  DEFINE_PARAM(max_text_tokens, 16)
-  DEFINE_PARAM(temperature, 17)
-  DEFINE_PARAM(max_initial_ts, 18)
-  DEFINE_PARAM(length_penalty, 19)
-  DEFINE_PARAM(temperature_inc, 20)
-  DEFINE_PARAM(entropy_thold, 21)
-  DEFINE_PARAM(logprob_thold, 22)
-  DEFINE_PARAM(no_speech_thold, 23)
-  DEFINE_PARAM(new_segment_callback, 24)
-  DEFINE_PARAM(new_segment_callback_user_data, 25)
-  DEFINE_PARAM(progress_callback, 26)
-  DEFINE_PARAM(progress_callback_user_data, 27)
-  DEFINE_PARAM(encoder_begin_callback, 28)
-  DEFINE_PARAM(encoder_begin_callback_user_data, 29)
-  DEFINE_PARAM(abort_callback, 30)
-  DEFINE_PARAM(abort_callback_user_data, 31)
-  DEFINE_PARAM(vad, 32)
-  DEFINE_PARAM(vad_model_path, 33)
-  DEFINE_PARAM(vad_params, 34)
+  DEFINE_PARAM(max_len, 11)
+  DEFINE_PARAM(split_on_word, 12)
+  DEFINE_PARAM(initial_prompt, 13)
+  DEFINE_PARAM(carry_initial_prompt, 14)
+  DEFINE_PARAM(diarize, 15)
+  DEFINE_PARAM(offset, 16)
+  DEFINE_PARAM(duration, 17)
+  DEFINE_PARAM(max_text_tokens, 18)
+  DEFINE_PARAM(temperature, 19)
+  DEFINE_PARAM(max_initial_ts, 20)
+  DEFINE_PARAM(length_penalty, 21)
+  DEFINE_PARAM(temperature_inc, 22)
+  DEFINE_PARAM(entropy_thold, 23)
+  DEFINE_PARAM(logprob_thold, 24)
+  DEFINE_PARAM(no_speech_thold, 25)
+  DEFINE_PARAM(new_segment_callback, 26)
+  DEFINE_PARAM(new_segment_callback_user_data, 27)
+  DEFINE_PARAM(progress_callback, 28)
+  DEFINE_PARAM(progress_callback_user_data, 29)
+  DEFINE_PARAM(encoder_begin_callback, 30)
+  DEFINE_PARAM(encoder_begin_callback_user_data, 31)
+  DEFINE_PARAM(abort_callback, 32)
+  DEFINE_PARAM(abort_callback_user_data, 33)
+  DEFINE_PARAM(vad, 34)
+  DEFINE_PARAM(vad_model_path, 35)
+  DEFINE_PARAM(vad_params, 36)
 
   rb_define_method(cParams, "on_new_segment", ruby_whisper_params_on_new_segment, 0);
   rb_define_method(cParams, "on_progress", ruby_whisper_params_on_progress, 0);

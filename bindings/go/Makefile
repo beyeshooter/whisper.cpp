@@ -25,7 +25,8 @@ ifeq ($(GGML_CUDA),1)
 endif
 
 ifeq ($(UNAME_S),Darwin)
-	EXT_LDFLAGS := -framework Foundation -framework Metal -framework MetalKit
+	LIBRARY_PATH := $(LIBRARY_PATH):$(abspath ../../${BUILD_DIR}/ggml/src/ggml-blas):$(abspath ../../${BUILD_DIR}/ggml/src/ggml-metal)
+	EXT_LDFLAGS := -framework Foundation -framework Metal -framework MetalKit -lggml-metal -lggml-blas
 endif
 
 all: clean whisper examples
