@@ -93,6 +93,11 @@ set(VAD_TEST test-vad)
 add_executable(${VAD_TEST} ${VAD_TEST}.cpp)
 target_include_directories(${VAD_TEST} PRIVATE ../include ../ggml/include ../examples)
 target_link_libraries(${VAD_TEST} PRIVATE common)
+# Allow undefined symbols in shared library deps (e.g. libcuda.so.1 from ggml-cuda)
+# in environments that have the CUDA toolkit but not the driver at link time.
+if (NOT WIN32)
+    target_link_options(${VAD_TEST} PRIVATE -Wl,--allow-shlib-undefined)
+endif()
 target_compile_definitions(${VAD_TEST} PRIVATE
     VAD_MODEL_PATH="${PROJECT_SOURCE_DIR}/models/for-tests-silero-v6.2.0-ggml.bin"
     SAMPLE_PATH="${PROJECT_SOURCE_DIR}/samples/jfk.wav")
